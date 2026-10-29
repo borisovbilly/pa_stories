@@ -1,0 +1,58 @@
+name: One-time Pages storage cleanup
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/cleanup-actions.yml']
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: cleanup-actions-storage
+  cancel-in-progress: true
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Keep only the newest Pages artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          kept=0
+          mapfile -t rows < <(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" --jq '.artifacts[] | select(.name == "github-pages") | [.id, .name, .size_in_bytes, .created_at] | @tsv')
+          for row in "${rows[@]}"; do
+            IFS=$'\t' read -r id name size created <<< "$row"
+            if (( kept == 0 )); then
+              kept=1
+              echo "KEEP $name ($size bytes, $created)"
+            else
+              echo "DELETE $name ($size bytes, $created)"
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id"
+            fi
+          done
+
+      - name: Remove caches unused for three days
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cutoff=$(date -u -d '3 days ago' +%s)
+          mapfile -t rows < <(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" --jq '.actions_caches[] | [.id, .key, .last_accessed_at, .size_in_bytes] | @tsv')
+          for row in "${rows[@]}"; do
+            IFS=$'\t' read -r id key accessed size <<< "$row"
+            accessed_epoch=$(date -u -d "$accessed" +%s)
+            if (( accessed_epoch < cutoff )); then
+              echo "DELETE cache $key ($size bytes, last used $accessed)"
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id"
+            else
+              echo "KEEP cache $key ($size bytes, last used $accessed)"
+            fi
+          done
